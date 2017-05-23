@@ -7,6 +7,8 @@ import calibration
 import utilities
 import numpy as np
 import matplotlib.pyplot as plt
+import pickle
+import multiprocessing
 
 MAX_FRAMES = 1000
 DO_ROLLING_SHUTTER = True;
@@ -19,7 +21,7 @@ class GyroVideo(object):
         self.duration = 0
         self.frameWidth = 0
         self.frameHeight = 0
-
+        
     def read_video(self, skip_keypoints=False):
         """
         Extracts the keypoints out of a video
@@ -91,8 +93,8 @@ class GyroVideo(object):
                 pt_new = (new[0][0], new[0][1])
                 cv2.line(pf, pt_old, pt_old, (0, 0, 255), 5)
                 cv2.line(nf, pt_new, pt_new, (0, 0, 255), 5)
-            cv2.imwrite("./tmp/ttt%04d-a.png" % frameCount, pf)
-            cv2.imwrite("./tmp/ttt%04d-b.png" % frameCount, nf)
+#             cv2.imwrite("./tmp/ttt%04d-a.png" % frameCount, pf)
+#             cv2.imwrite("./tmp/ttt%04d-b.png" % frameCount, nf)
             pf = None
             nf = None
 
@@ -246,72 +248,12 @@ def accumulateRotation(src, theta_x, theta_y, theta_z, timestamps, prev, current
 
     
 
-def rotateImage(src, rx, ry, rz, dx, dy, dz, f, convertToRadians=False):
-    if convertToRadians:
-        rx = (rx) * math.pi / 180
-        ry = (ry) * math.pi / 180
-        rz = (rz) * math.pi / 180
-
-    rx = float(rx)
-    ry = float(ry)
-    rz = float(rz)
-
-    w = src.shape[1]
-    h = src.shape[0]
-
-    x = np.array([[1, 0, -w/2],
-                      [0, 1, -h/2],
-                      [0, 0, 0],
-                      [0, 0, 1]])
-
-    A1 = np.asmatrix(x)
-    smallR = cv2.Rodrigues(np.array([rx, ry, rz]))[0]
-    
-    R = np.array([[smallR[0][0], smallR[0][1], smallR[0][2], 0],
-                     [smallR[1][0], smallR[1][1], smallR[1][2], 0],
-                     [smallR[2][0], smallR[2][1], smallR[2][2], 0],
-                     [0,         0,         0,         1]])
-
-
-    x = np.array([[1.0, 0, 0, dx],
-                     [0, 1.0, 0, dy],
-                     [0, 0, 1.0, dz],
-                     [0, 0, 0, 1.0]])
-    T = np.asmatrix(x)
-
-    x = np.array([[f, 0, w/2, 0],
-                     [0, f, h/2, 0],
-                     [0, 0, 1, 0]])
-    A2 = np.asmatrix(x)
-
-    transform = A2*(T*(R*A1))
-    o = cv2.warpPerspective(src, transform, (w, h))
-    return o
-
-
 def render_trio(signal_x, signal_y, signal_z, timestamps):
     plt.plot(timestamps, signal_x, 'b-', timestamps, signal_y, 'g-', timestamps, signal_z, 'r-')
     plt.ylabel("Y")
     plt.show()
 
 class CalibrateGyroStabilize(object):
-    def get_gaussian_kernel(self, sigma2, v1, v2, normalize=True):
-        gauss = [math.exp(-(float(x*x) / sigma2)) for x in range(v1, v2+1)]
-        total = sum(gauss)
-
-        if normalize:
-            gauss = [x/total for x in gauss]
-
-        return gauss
-
-    def gaussian_filter(self, input_array, sigma=10000, r=250):
-        """
-        """
-        # Step 1: Define the convolution kernel
-        kernel = self.get_gaussian_kernel(sigma, -r, r)
-
-        # Step 2: Convolve
-        return np.convolve(input_array, kernel, 'same')
 
     def calcErrorScore(self, set1, set2):
         if len(set1) != len(set2):
@@ -409,13 +351,10 @@ class CalibrateGyroStabilize(object):
         gyro_drift = ( float(parameters[2]), float(parameters[3]), float(parameters[4]) )
         rolling_shutter = float(parameters[5])
 
-        #print "Focal length = %f" % focal_length
-        #print "gyro_delay = %f" % gyro_delay
-        #print "gyro_drift = (%f, %f, %f)" % gyro_drift
-
         error = self.calcErrorAcrossVideo(videoObj, theta, timestamps, focal_length, gyro_delay, gyro_drift, rolling_shutter)
-        print "%f %f %f Error = %f" % (focal_length, gyro_delay, rolling_shutter, (error / videoObj.numFrames))
+        print "%d %f %f %f Error = %f" % (self.parallel_id, focal_length, gyro_delay, rolling_shutter, (error / videoObj.numFrames))
         return error
+
 
     def diff(self, timestamps):
         """
@@ -424,179 +363,17 @@ class CalibrateGyroStabilize(object):
         return np.ediff1d(timestamps)
 
 
-    def __init__(self, mp4, csv):
-        self.mp4 = mp4
-        self.csv = csv
+    def __init__(self, parallel_id, parameters, inputs):
+        self.parallel_id = parallel_id
+        self.parameters = parameters
+        self.inputs = inputs
         
-    def inputs(self):
-        gdf = calibration.GyroscopeDataFile(self.csv)
-        gdf.parse()
-
-        signal_x = gdf.get_signal_x()
-        signal_y = gdf.get_signal_y()
-        signal_z = gdf.get_signal_z()
-        timestamps = gdf.get_timestamps()
-
-        # Smooth out the noise
-        smooth_signal_x = self.gaussian_filter(signal_x)
-        smooth_signal_y = self.gaussian_filter(signal_y)
-        smooth_signal_z = self.gaussian_filter(signal_z)
-        
-#         g_file = open('g.txt', 'w')
-#             
-#         for i in range(0, len(smooth_signal_x), 1):
-#             g_file.write("%lf %lf %lf %d\n" % (smooth_signal_x.item(i),smooth_signal_y.item(i),smooth_signal_z.item(i),timestamps[i]))
-#             
-#         g_file.close()
-
-        render_trio(signal_x, signal_y, signal_z, timestamps)
-        render_trio(smooth_signal_x, smooth_signal_y, smooth_signal_z, timestamps)
-
-        # g is the difference between the smoothed version and the actual version
-        g = [ [], [], [] ]
-        delta_g = [ [], [], [] ]
-        delta_g[0] = np.subtract(signal_x, smooth_signal_x).tolist()
-        delta_g[1] = np.subtract(signal_y, smooth_signal_y).tolist()
-        delta_g[2] = np.subtract(signal_z, smooth_signal_z).tolist()
-        g[0] = signal_x #np.subtract(signal_x, smooth_signal_x).tolist()
-        g[1] = signal_y #np.subtract(signal_y, smooth_signal_y).tolist()
-        g[2] = signal_z #np.subtract(signal_z, smooth_signal_z).tolist()
-        dgt = utilities.diff(timestamps)
-
-        theta = [ [], [], [] ]
-        delta_theta = [ [], [], [] ]
-        for component in [0, 1, 2]:
-            sum_of_consecutives = np.add(g[component][:-1], g[component][1:])
-            # The 2 is for the integration - and 10e9 for the nanosecond
-            dx_0 = np.divide(sum_of_consecutives, 2 * 1000000000)
-            num_0 = np.multiply(dx_0, dgt)
-            theta[component] = [0]
-            theta[component].extend(np.cumsum(num_0))
-
-            sum_of_delta_consecutives = np.add(delta_g[component][:-1], delta_g[component][1:])
-            dx_0 = np.divide(sum_of_delta_consecutives, 2 * 1000000000)
-            num_0 = np.multiply(dx_0, dgt)
-            delta_theta[component] = [0]
-            delta_theta[component].extend(np.cumsum(num_0))
-            
-        
-
-        # UNKNOWNS
-        focal_length = 1080.0
-        gyro_delay = 0
-        gyro_drift = (0, 0, 0)
-        shutter_duration = 0
-
-        parts = self.mp4.split("/")
-        pickle_file_name = parts[-1].split(".")[0]
-        pickle_full_path = ".%s/%s.pickle" % ("/".join(parts[:-1]), pickle_file_name)
-        print("Pickle file = %s" % pickle_full_path)
-        
-        
-
-        import pickle
-        videoObj = None
-        if not os.path.exists(pickle_full_path):
-            print("Pickle file not found - generating it")
-            videoObj = GyroVideo(self.mp4)
-            videoObj.read_video()
-            fp = open(pickle_full_path, "w")
-            pickle.dump(videoObj, fp)
-            fp.close()
-        else:
-            fp = open(pickle_full_path, "r")
-            videoObj = pickle.load(fp)
-            fp.close()
-
-        
-        return (delta_theta, timestamps)
-        #return ( (smooth_delta_x, smooth_delta_y, smooth_delta_z), timestamps, focal_length, gyro_delay, gyro_drift, shutter_duration)
-
 
     def calibrate(self):
-        gdf = calibration.GyroscopeDataFile(self.csv)
-        gdf.parse()
-
-        signal_x = gdf.get_signal_x()
-        signal_y = gdf.get_signal_y()
-        signal_z = gdf.get_signal_z()
-        timestamps = gdf.get_timestamps()
-
-        # Smooth out the noise
-        smooth_signal_x = self.gaussian_filter(signal_x)
-        smooth_signal_y = self.gaussian_filter(signal_y)
-        smooth_signal_z = self.gaussian_filter(signal_z)
-        
-#         g_file = open('g.txt', 'w')
-#             
-#         for i in range(0, len(smooth_signal_x), 1):
-#             g_file.write("%lf %lf %lf %d\n" % (smooth_signal_x.item(i),smooth_signal_y.item(i),smooth_signal_z.item(i),timestamps[i]))
-#             
-#         g_file.close()
-
-#         render_trio(signal_x, signal_y, signal_z, timestamps)
-#         render_trio(smooth_signal_x, smooth_signal_y, smooth_signal_z, timestamps)
-
-        # g is the difference between the smoothed version and the actual version
-        g = [ [], [], [] ]
-        delta_g = [ [], [], [] ]
-        delta_g[0] = np.subtract(signal_x, smooth_signal_x).tolist()
-        delta_g[1] = np.subtract(signal_y, smooth_signal_y).tolist()
-        delta_g[2] = np.subtract(signal_z, smooth_signal_z).tolist()
-        g[0] = signal_x #np.subtract(signal_x, smooth_signal_x).tolist()
-        g[1] = signal_y #np.subtract(signal_y, smooth_signal_y).tolist()
-        g[2] = signal_z #np.subtract(signal_z, smooth_signal_z).tolist()
-        dgt = utilities.diff(timestamps)
-
-        theta = [ [], [], [] ]
-        delta_theta = [ [], [], [] ]
-        for component in [0, 1, 2]:
-            sum_of_consecutives = np.add(g[component][:-1], g[component][1:])
-            # The 2 is for the integration - and 10e9 for the nanosecond
-            dx_0 = np.divide(sum_of_consecutives, 2 * 1000000000)
-            num_0 = np.multiply(dx_0, dgt)
-            theta[component] = [0]
-            theta[component].extend(np.cumsum(num_0))
-
-            sum_of_delta_consecutives = np.add(delta_g[component][:-1], delta_g[component][1:])
-            dx_0 = np.divide(sum_of_delta_consecutives, 2 * 1000000000)
-            num_0 = np.multiply(dx_0, dgt)
-            delta_theta[component] = [0]
-            delta_theta[component].extend(np.cumsum(num_0))
-            
-    
-
-        parts = self.mp4.split("/")
-        pickle_file_name = parts[-1].split(".")[0]
-        pickle_full_path = ".%s/%s.pickle" % ("/".join(parts[:-1]), pickle_file_name)
-        print("Pickle file = %s" % pickle_full_path)
-        
-        
-
-        import pickle
-        videoObj = None
-        if not os.path.exists(pickle_full_path):
-            print("Pickle file not found - generating it")
-            videoObj = GyroVideo(self.mp4)
-            videoObj.read_video()
-            fp = open(pickle_full_path, "w")
-            pickle.dump(videoObj, fp)
-            fp.close()
-        else:
-            fp = open(pickle_full_path, "r")
-            videoObj = pickle.load(fp)
-            fp.close()
-
-        print "Calibrating parameters"
-        print "=====================+"
-
-        parameters = np.asarray([1000, 
-                                    112859286.844093,
-                                    0.0, 0.0, 0.0,
-                                    -32763211.985663])
-
+        print self.parallel_id
         import scipy.optimize
-        result = scipy.optimize.minimize(self.calcErrorAcrossVideoObjective, parameters, (videoObj, theta, timestamps), 'Nelder-Mead', tol=0.001)
+        result = scipy.optimize.minimize(self.calcErrorAcrossVideoObjective, self.parameters, (self.inputs[0], self.inputs[1], self.inputs[2]), 'Nelder-Mead', tol=0.001)
+        
         print result
 
         focal_length = result['x'][0]
@@ -608,101 +385,168 @@ class CalibrateGyroStabilize(object):
         print "Gyro delay   = %f" % gyro_delay
         print "Gyro drift   = (%f, %f, %f)" % gyro_drift
         print "Shutter duration= %f" % shutter_duration
+        
+        from time import gmtime, strftime
+        out_str = str(self.parallel_id)+' '+str(focal_length)+' '+str(gyro_delay)+" "+str(shutter_duration)+' '+strftime("%Y-%m-%d %H:%M:%S", gmtime())+'\n'
+        out_path = "out%s" % video_name
+        f = open(out_path, 'w')
+        f.write(out_str)
+        f.close()
 
         # Smooth out the delta_theta values - they must be fluctuating like crazy
 
-        smooth_delta_x = self.gaussian_filter(delta_theta[0], 128, 16)
-        smooth_delta_y = self.gaussian_filter(delta_theta[1], 128, 16)
-        smooth_delta_z = self.gaussian_filter(delta_theta[2], 128, 16)
-        return (delta_theta, timestamps, focal_length, gyro_delay, gyro_drift, shutter_duration)
-        #return ( (smooth_delta_x, smooth_delta_y, smooth_delta_z), timestamps, focal_length, gyro_delay, gyro_drift, shutter_duration)
+        # smooth_delta_x = self.gaussian_filter(delta_theta[0], 128, 16)
+        # smooth_delta_y = self.gaussian_filter(delta_theta[1], 128, 16)
+        # smooth_delta_z = self.gaussian_filter(delta_theta[2], 128, 16)
+        # return (delta_theta, timestamps, focal_length, gyro_delay, gyro_drift, shutter_duration)
+        # return ( (smooth_delta_x, smooth_delta_y, smooth_delta_z), timestamps, focal_length, gyro_delay, gyro_drift, shutter_duration)
 
-import pickle
+def get_gaussian_kernel(sigma2, v1, v2, normalize=True):
+        gauss = [math.exp(-(float(x*x) / sigma2)) for x in range(v1, v2+1)]
+        total = sum(gauss)
 
-def stabilize_video(mp4, csv, video_name):
-    calib_obj = CalibrateGyroStabilize(mp4, csv)
-#     delta_theta, timestamps, focal_length, gyro_delay, gyro_drift, shutter_duration = calib_obj.calibrate()
-      
-#     delta_theta0, timestamps0, focal_length0, gyro_delay0, gyro_drift0, shutter_duration0 = calib_obj.calibrate()
-#     data0 = [delta_theta0, timestamps0, focal_length0, gyro_delay0, gyro_drift0, shutter_duration0]
-#                        
-#     output = open(video_name+'data.pkl', 'wb')
-#     pickle.dump(data0, output)
-#     output.close()
+        if normalize:
+            gauss = [x/total for x in gauss]
 
-    delta_theta, timestamps = calib_obj.inputs()
+        return gauss
 
-    pkl_file = open(video_name+'data.pkl', 'rb')
-    data1 = pickle.load(pkl_file)
-    pkl_file.close()
-  
-    delta_theta = data1[0]
-    timestamps = data1[1]
-#     focal_length = data1[2]
-#     gyro_delay = data1[3]
-#     gyro_drift = data1[4]
-#     shutter_duration = data1[5]
-    
-# Zenfone 2
-    focal_length = 1930.143895
-    gyro_delay = 85734643.000231
-    gyro_drift = (0.000407, -0.000390, 0.001916)
-    shutter_duration = -2103532.749709
+def gaussian_filter(input_array, sigma=10000, r=250):
+    """
+    """
+    # Step 1: Define the convolution kernel
+    kernel = get_gaussian_kernel(sigma, -r, r)
+
+    # Step 2: Convolve
+    return np.convolve(input_array, kernel, 'same')
+
+def parse_inputs(csv, video_name):
+    gdf = calibration.GyroscopeDataFile(csv)
+    gdf.parse()
+
+    signal_x = gdf.get_signal_x()
+    signal_y = gdf.get_signal_y()
+    signal_z = gdf.get_signal_z()
+    timestamps = gdf.get_timestamps()
 
     
-    print "focal_length %f" % focal_length
-    print "gyro_delay %f" % gyro_delay
-    print "gyro_drift %f %f %f" % gyro_drift
-    print "shutter_duration %f" % shutter_duration
+    matlab_gyro_file_path = "%s.txt" % video_name   
     
-#     render_trio(delta_theta[0], delta_theta[1], delta_theta[2], timestamps)
     
-
-    # Now start reading the frames
-    vidcap = cv2.VideoCapture(mp4)
-#     
-#     vw = vidcap.get(3)
-#     vh = vidcap.get(4)
-#     vfps = vidcap.get(7)
-
-    frameCount = 0
-    success, frame = vidcap.read()
-    
-    out_video_name = './' + video_name + '_stab.mp4'
-    if os.path.exists(out_video_name):
-        os.remove(out_video_name);
-    fourcc = cv2.VideoWriter_fourcc(*'MP4V')
-#     out_video = cv2.VideoWriter(out_video_name, fourcc, 29.9599, (1920,1080))
-    out_video = cv2.VideoWriter(out_video_name, fourcc, 24.83, (1280,720))
-    previous_timestamp = 0
-    while success:
-#         print "Processing frame %d" % frameCount
-        # Timestamp in nanoseconds
-        current_timestamp = vidcap.get(0) * 1000 * 1000
-        print "%s" % current_timestamp
-        rot, prev, current = fetch_closest_trio(delta_theta[0], delta_theta[1], delta_theta[2], timestamps, current_timestamp)
+    if not os.path.exists(matlab_gyro_file_path):
+        print("Matlab gyro file not found - generating it")
         
-        rot = accumulateRotation(frame, delta_theta[0], delta_theta[1], delta_theta[2], timestamps, previous_timestamp, prev, focal_length, gyro_delay, gyro_drift, shutter_duration)
-
-        cv2.imshow('image', rot)
-        cv2.waitKey(50)
-
-        #print "    rotation: %f, %f, %f" % (rot[0] * 180 / math.pi, 
-        #                                    rot[1] * 180 / math.pi,
-        #                                    rot[2] * 180 / math.pi)
+        matlab_gyro_file = open(matlab_gyro_file_path, 'w')
+        matlab_gyro_file.write("size: [%d 4]\n" % len(signal_x))
+        for i in range(len(signal_x)):
+            matlab_gyro_file.write(str(signal_x[i])+" "+str(signal_y[i])+" "+str(signal_z[i])+" "+str(timestamps[i])+"\n")
         
-        out_video.write(rot)
-        
-#         cv2.imwrite('./tmp/frame%04d.png' % frameCount, frame)
-#         cv2.imwrite('./tmp/rotated%04d.png' % frameCount, rot)
-        frameCount += 1
-        previous_timestamp = prev
+        timestamp_list = []
+        vidcap = cv2.VideoCapture("%s.mp4" % video_name)
         success, frame = vidcap.read()
+        while success:
+            timestamp = vidcap.get(0) * 1000 * 1000
+#             print "%d %s" % (timestamp_count, timestamp)
+            timestamp_list.append(timestamp)
+            success, frame = vidcap.read()
+#         print("**** %d ****" % timestamp_count)
+        matlab_gyro_file.write("size: [%d 1]\n" % len(timestamp_list))
+        for t in timestamp_list:
+            matlab_gyro_file.write("%s\n" % str(t))
+            
+        matlab_gyro_file.close()
 
-        if frameCount == MAX_FRAMES:
-            break
-#     out_video.relese()
-    print "END"
+    # Smooth out the noise
+    smooth_signal_x = gaussian_filter(signal_x)
+    smooth_signal_y = gaussian_filter(signal_y)
+    smooth_signal_z = gaussian_filter(signal_z)
+
+    render_trio(signal_x, signal_y, signal_z, timestamps)
+    render_trio(smooth_signal_x, smooth_signal_y, smooth_signal_z, timestamps)
+
+    # g is the difference between the smoothed version and the actual version
+    g = [ [], [], [] ]
+    delta_g = [ [], [], [] ]
+    delta_g[0] = np.subtract(signal_x, smooth_signal_x).tolist()
+    delta_g[1] = np.subtract(signal_y, smooth_signal_y).tolist()
+    delta_g[2] = np.subtract(signal_z, smooth_signal_z).tolist()
+    g[0] = signal_x #np.subtract(signal_x, smooth_signal_x).tolist()
+    g[1] = signal_y #np.subtract(signal_y, smooth_signal_y).tolist()
+    g[2] = signal_z #np.subtract(signal_z, smooth_signal_z).tolist()
+    dgt = utilities.diff(timestamps)
+
+    theta = [ [], [], [] ]
+    delta_theta = [ [], [], [] ]
+    for component in [0, 1, 2]:
+        sum_of_consecutives = np.add(g[component][:-1], g[component][1:])
+        # The 2 is for the integration - and 10e9 for the nanosecond
+        dx_0 = np.divide(sum_of_consecutives, 2 * 1000000000)
+        num_0 = np.multiply(dx_0, dgt)
+        theta[component] = [0]
+        theta[component].extend(np.cumsum(num_0))
+
+        sum_of_delta_consecutives = np.add(delta_g[component][:-1], delta_g[component][1:])
+        dx_0 = np.divide(sum_of_delta_consecutives, 2 * 1000000000)
+        num_0 = np.multiply(dx_0, dgt)
+        delta_theta[component] = [0]
+        delta_theta[component].extend(np.cumsum(num_0))
+        
+    
+    pickle_full_path = "%s.pickle" % video_name
+    print("Pickle file = %s" % pickle_full_path)
+    
+    videoObj = None
+    if not os.path.exists(pickle_full_path):
+        print("Pickle file not found - generating it")
+        videoObj = GyroVideo("%s.mp4" % video_name)
+        videoObj.read_video()
+        fp = open(pickle_full_path, "w")
+        pickle.dump(videoObj, fp)
+        fp.close()
+    else:
+        fp = open(pickle_full_path, "r")
+        videoObj = pickle.load(fp)
+        fp.close()
+        
+    parameters = (videoObj, theta, timestamps)
+    return parameters
+
+def runInParallel(fns):
+    proc = []
+    for fn in fns:
+        p = multiprocessing.Process(target=fn)
+        proc.append(p)
+        p.start()
+    for p in proc:
+        p.join()
+    
+def calibration_min(csv, video_name):
+    inputs = parse_inputs(csv, video_name)
+    
+#     Initial guess of three parameters
+    fl = 1000
+    td = 112859286
+    ts = -32763211
+    
+    parameters = np.asarray([fl, td, 0.0, 0.0, 0.0, ts])
+    calib_obj = CalibrateGyroStabilize(0, parameters, inputs)
+    calib_obj.calibrate()
+  
+def calibration_min_parallel(csv, video_name):
+    inputs = parse_inputs(csv, video_name)
+    
+    calib_objs = []
+    process_count = 1
+    
+#     Set the ranges of initial guesses of three parameters
+    for fl in range(200, 600, 200):
+        for td in range(0, 100000000, 20000000):
+            for ts in range(-30000000, 30000000, 10000000):
+                parameters = np.asarray([fl, td, 0.0, 0.0, 0.0, ts])
+                calib_obj = CalibrateGyroStabilize(process_count, parameters, inputs)
+                calib_objs.append(calib_obj.calibrate)
+                process_count = process_count + 1
+    
+    runInParallel(calib_objs)
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
@@ -715,4 +559,8 @@ if __name__ == "__main__":
     print("MP4 = %s" % mp4path)
     print("CSV = %s" % csvpath)
 
-    stabilize_video(mp4path, csvpath, video_name)
+    if len(sys.argv) == 3 and sys.argv[2] == "-p":
+        print("Run parallel process")
+        calibration_min_parallel(csvpath, video_name)
+    else:
+        calibration_min(csvpath, video_name)
