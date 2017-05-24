@@ -389,7 +389,7 @@ class CalibrateGyroStabilize(object):
         from time import gmtime, strftime
         out_str = str(self.parallel_id)+' '+str(focal_length)+' '+str(gyro_delay)+" "+str(shutter_duration)+' '+strftime("%Y-%m-%d %H:%M:%S", gmtime())+'\n'
         out_path = "out%s" % video_name
-        f = open(out_path, 'w')
+        f = open(out_path, ‘a’)
         f.write(out_str)
         f.close()
 
